@@ -5,72 +5,69 @@ class TelemetryTable(QTableWidget):
     def __init__(self):
         super().__init__()
         
-        # 1. 미션 요구사항 3.1.1.1에 맞춘 헤더 정의 (총 22개)
+        # [요구사항 1~18 반영 헤더]
         self.headers = [
-            "TEAM_ID", "MISSION_TIME", "PACKET_COUNT", "MODE", "STATE", "ALTITUDE",
-            "TEMPERATURE", "PRESSURE", "VOLTAGE", "CURRENT", "GYRO_R", "GYRO_P",
-            "GYRO_Y", "ACCEL_R", "ACCEL_P", "ACCEL_Y", "GPS_TIME", "GPS_ALTITUDE",
-            "GPS_LATITUDE", "GPS_LONGITUDE", "GPS_SATS", "CMD_ECHO"
+            "TEAM_ID",          # 1. Team ID
+            "MISSION_TIME",     # 2. UTC Time
+            "PACKET_COUNT",     # 3. Total Count
+            "MODE",             # 4. F or S
+            "STATE",            # 5. Software State
+            "ALTITUDE",         # 6. Relative Altitude
+            "TEMPERATURE",      # 7. Temperature
+            "PRESSURE",         # 8. Pressure (kPa)
+            "VOLTAGE",          # 9. Bus Voltage
+            "CURRENT",          # 10. Battery Current
+            "GYRO_R",           # 11. Gyro Roll
+            "GYRO_P",           # 11. Gyro Pitch
+            "GYRO_Y",           # 11. Gyro Yaw
+            "ACCEL_R",          # 12. Accel Roll
+            "ACCEL_P",          # 12. Accel Pitch
+            "ACCEL_Y",          # 12. Accel Yaw
+            "GPS_TIME",         # 13. GPS Time
+            "GPS_ALTITUDE",     # 14. GPS Altitude
+            "GPS_LATITUDE",     # 15. GPS Latitude
+            "GPS_LONGITUDE",    # 16. GPS Longitude
+            "GPS_SATS",         # 17. Satellites Count
+            "CMD_ECHO"          # 18. Last Command
         ]
         
-        # 2. 컬럼 설정
         self.setColumnCount(len(self.headers))
         self.setHorizontalHeaderLabels(self.headers)
-        
-        # 3. 컬럼 너비 설정 (내용에 맞게 자동 조절 + 가로 스크롤)
         self.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         
-        # 스타일 설정
         self.setAlternatingRowColors(True)
         self.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
 
     def add_data(self, data_list):
-        """
-        data_list: 백엔드에서 넘어온 리스트
-        요구사항에 따라 최소 22개의 데이터가 있어야 정상 처리
-        """
+        # 데이터 개수 체크 (22개 컬럼)
         if not data_list or len(data_list) < 22:
             return
 
         row_idx = self.rowCount()
         self.insertRow(row_idx)
 
-        # 데이터 매핑
         for i in range(len(self.headers)):
             if i < len(data_list):
                 val = str(data_list[i]).strip()
                 item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.setItem(row_idx, i, item)
+            else:
+                self.setItem(row_idx, i, QTableWidgetItem(""))
         
         self.scrollToBottom()
         
     def search_time_and_scroll(self, target_time):
-        """
-        특정 시간(문자열)을 포함하는 행을 찾아 포커스 이동
-        Target Column: 1번 인덱스 (MISSION_TIME)
-        """
-        # 테이블 전체 행을 스캔
         row_count = self.rowCount()
-        found = False
-        
-        # 기존 선택 해제
         self.clearSelection()
 
         for row in range(row_count):
-            # 1번 컬럼(MISSION_TIME)의 아이템을 가져옴
             item = self.item(row, 1) 
             if item and target_time in item.text():
-                # 찾았다!
-                self.selectRow(row) # 해당 행 선택(파란색 하이라이트)
-                self.scrollToItem(item, self.ScrollHint.PositionAtCenter) # 화면 중앙으로 스크롤 이동
-                found = True
-                print(f"🔍 검색 성공: Row {row} -> {item.text()}")
-                break # 첫 번째 발견된 곳에서 멈춤
-        
-        if not found:
-            print(f"⚠️ 검색 실패: '{target_time}'을(를) 찾을 수 없습니다.")
-
+                self.selectRow(row) 
+                self.scrollToItem(item, self.ScrollHint.PositionAtCenter)
+                break 
+    
     def clear_table(self):
         self.setRowCount(0)

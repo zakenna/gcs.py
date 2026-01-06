@@ -1,20 +1,28 @@
 import time
 import datetime
+import csv
+import os
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 import serial
 import serial.tools.list_ports
 
-# ========================================================
-# [설정] 팀 ID와 포트 (가상 포트 프로그램 설정과 일치해야 함)
-# ========================================================
 TEAM_ID = 1062
-SERIAL_PORT_NAME = "COM45" # 지상국 포트 (사용자 환경에 맞게 COM8/COM45 등 수정)
+SERIAL_PORT_NAME = "COM45" 
 BAUDRATE = 115200
+CSV_FILENAME = "Flight_1062.csv"
 
 SIM_STATE = {
     "IDLE": "IDLE", "LOADED": "LOADED", "ENABLED": "ENABLED",
     "RUNNING": "RUNNING", "X": "DISABLE"
 }
+
+# [수정] 요구사항에 맞춘 CSV 헤더 (Table View와 동일)
+CSV_HEADERS = [
+    "TEAM_ID", "MISSION_TIME", "PACKET_COUNT", "MODE", "STATE", "ALTITUDE",
+    "TEMPERATURE", "PRESSURE", "VOLTAGE", "CURRENT", "GYRO_R", "GYRO_P",
+    "GYRO_Y", "ACCEL_R", "ACCEL_P", "ACCEL_Y", "GPS_TIME", "GPS_ALTITUDE",
+    "GPS_LATITUDE", "GPS_LONGITUDE", "GPS_SATS", "CMD_ECHO"
+]
 
 class SerialWorker(QThread):
     data_received = pyqtSignal(str) 
@@ -35,13 +43,11 @@ class SerialWorker(QThread):
             while self.is_running:
                 if self.serial_port.in_waiting:
                     try:
-                        # 데이터 읽기
                         line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
                         if line:
                             self.data_received.emit(line)
                     except Exception as e:
                         print(f"Read Error: {e}")
-                
                 self.msleep(10)
 
         except Exception as e:
@@ -55,7 +61,7 @@ class SerialWorker(QThread):
             try:
                 msg = command_str.strip() + "\n"
                 self.serial_port.write(msg.encode('utf-8'))
-                print(f"🚀 [GCS 전송]: {msg.strip()}")
+                print(f"[GCS 전송]: {msg.strip()}")
             except Exception as e:
                 print(f"Send Error: {e}")
 
@@ -68,7 +74,7 @@ class SimDataManager:
 
 class GCSBackend(QObject):
     data_received = pyqtSignal(list)
-    log_received = pyqtSignal(str)
+    log_received = pyqtSignal(str, str)
     state_changed = pyqtSignal(str)
 
     def __init__(self):
@@ -77,48 +83,57 @@ class GCSBackend(QObject):
         self.packet_count = 0
         self.latest_gps = {"lat": 0.0, "lng": 0.0}
         
+        self.init_csv_file()
+
         self.worker = SerialWorker(SERIAL_PORT_NAME, BAUDRATE)
         self.worker.data_received.connect(self.process_raw_data)
         self.worker.start()
 
         self.sim_manager = SimDataManager()
+
+    def init_csv_file(self):
+        if not os.path.exists(CSV_FILENAME):
+            try:
+                with open(CSV_FILENAME, mode='w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(CSV_HEADERS)
+                print(f"CSV파일 생성 완료: {CSV_FILENAME}")
+            except Exception as e:
+                print(f"CSV파일 생성 실패: {e}")
+
+    def save_to_csv(self, data_list):
+        try:
+            with open(CSV_FILENAME, mode='a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(data_list)
+        except Exception as e:
+            print(f"CSV저장 실패: {e}")
         
     def process_raw_data(self, line):
         parts = line.split(',')
-        
-        # [데이터 패킷 조건] TEAM_ID로 시작하는지 확인
         if len(parts) > 5 and parts[0] == str(TEAM_ID):
             try:
                 self.packet_count = int(parts[2])
-                
-                # [수정됨] GPS 인덱스 오류 수정 (Sender.py 기준)
-                # Sender: Time(16), Lat(17), Lng(18), Sat(19)
-                self.latest_gps['lat'] = float(parts[17]) 
-                self.latest_gps['lng'] = float(parts[18])
+                self.latest_gps['lat'] = float(parts[18]) 
+                self.latest_gps['lng'] = float(parts[19])
             except:
                 pass
 
-            # UI로 데이터 쏘기
             self.data_received.emit(parts)
+            self.save_to_csv(parts)
             
-            if "MEC_ON" in parts[-1]:
-                self.log_received.emit(f"🔥 MEC ACTIVATED (Packet #{self.packet_count})")
-        
+            if len(parts) > 20 and ("MEC_ON" in parts[-1] or "MEC_ACTIVATED" in parts[-1]):
+                self.log_received.emit("SYS", f"🔥 MEC ACTIVATED (Packet #{self.packet_count})")
         else:
-            # 데이터 형식이 아니면 로그창(Echo)에라도 띄움
-            self.log_received.emit(f"{line}")
+            self.log_received.emit("RX", f"{line}")
 
-    # ▼▼▼▼▼ [누락되었던 함수 추가] ▼▼▼▼▼
     def log_command(self, tag, msg):
-        """명령어 전송 로그를 UI Echo창에 띄우는 함수"""
-        self.log_received.emit(f"[{tag}] {msg}")
-    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+        self.log_received.emit(tag, msg)
 
     def update_state(self, new_state):
         self.state = new_state
         self.state_changed.emit(new_state)
 
-    # === 명령어 함수들 ===
     def cmd_cx_on(self):
         self.worker.send_command(f"CMD,{TEAM_ID},CX,ON")
         self.log_command("CMD", "CX ON Sent")
@@ -147,7 +162,7 @@ class GCSBackend(QObject):
 
     def load_sim_data(self):
         self.worker.send_command(f"CMD,{TEAM_ID},SIM,ENABLE")
-        self.log_command("SIM", "Enable Sent") # 여기가 에러나던 곳
+        self.log_command("SIM", "Enable Sent")
         self.update_state(SIM_STATE["ENABLED"])
 
     def activate_sim(self):
