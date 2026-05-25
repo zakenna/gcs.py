@@ -1,0 +1,208 @@
+import time
+import datetime
+import csv
+import os
+import random
+from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer
+from PyQt6.QtWidgets import QFileDialog
+import serial
+
+# =========================================================
+# FSW(Teensy) New_Teensy/src/main.cpp 규격과 100% 동기화
+# =========================================================
+TEAM_ID = 1062
+SERIAL_PORT_NAME = "COM3" 
+BAUDRATE = 9600 
+CSV_FILENAME = "Flight_1062.csv"
+
+# 시뮬레이션 상태 정의
+SIM_STATE = {
+    "IDLE": "IDLE", "LOADED": "LOADED", "ENABLED": "ENABLED",
+    "RUNNING": "RUNNING"
+}
+
+# FSW main.cpp의 generateTelemetry() 출력 순서와 1:1 대응 (총 22개 필드)
+CSV_HEADERS = [
+    "TEAM_ID", "MISSION_TIME", "PACKET_COUNT", "MODE", "STATE", 
+    "ALTITUDE", "TEMPERATURE", "PRESSURE", "VOLTAGE", "CURRENT", 
+    "GYRO_R", "GYRO_P", "GYRO_Y", 
+    "ACCEL_X", "ACCEL_Y", "ACCEL_Z", 
+    "GPS_TIME", "GPS_ALTITUDE", "GPS_LATITUDE", "GPS_LONGITUDE", "GPS_SATS", 
+    "CMD_ECHO"
+]
+
+class SerialWorker(QThread):
+    data_received = pyqtSignal(str) 
+
+    def __init__(self, port_name, baudrate):
+        super().__init__()
+        self.port_name = port_name
+        self.baudrate = baudrate
+        self.serial_port = None
+        self.is_running = False
+
+    def run(self):
+        self.is_running = True
+        try:
+            self.serial_port = serial.Serial(self.port_name, self.baudrate, timeout=0.1)
+            print(f"✅ [GCS] XBee 연결 성공: {self.port_name}")
+            
+            while self.is_running:
+                if self.serial_port and self.serial_port.in_waiting:
+                    try:
+                        line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
+                        if line:
+                            self.data_received.emit(line)
+                    except Exception as e:
+                        print(f"Serial Read Error: {e}")
+                self.msleep(10)
+        except Exception as e:
+            print(f"❌ [GCS] 시리얼 연결 실패: {e}")
+        finally:
+            if self.serial_port and self.serial_port.is_open:
+                self.serial_port.close()
+
+    def send_command(self, command_str):
+        if self.serial_port and self.serial_port.is_open:
+            try:
+                msg = command_str.strip() + "\n"
+                self.serial_port.write(msg.encode('utf-8'))
+                print(f"[GCS -> FSW]: {msg.strip()}")
+            except Exception as e:
+                print(f"Command Send Error: {e}")
+
+    def stop(self):
+        self.is_running = False
+        self.wait()
+
+class GCSBackend(QObject):
+    data_received = pyqtSignal(list)
+    log_received = pyqtSignal(str, str)
+    state_changed = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.state = SIM_STATE["IDLE"]
+        self.packet_count = 0
+        self.latest_gps = {"lat": 0.0, "lng": 0.0}
+        
+        self.sim_data = []      
+        self.sim_index = 0      
+        self.sim_timer = QTimer()
+        self.sim_timer.timeout.connect(self.send_next_sim_line)
+        
+        self.init_csv_file()
+        self.worker = SerialWorker(SERIAL_PORT_NAME, BAUDRATE)
+        self.worker.data_received.connect(self.process_raw_data)
+        self.worker.start()
+
+    def init_csv_file(self):
+        if not os.path.exists(CSV_FILENAME):
+            with open(CSV_FILENAME, mode='w', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow(CSV_HEADERS)
+
+    def save_to_csv(self, data_list):
+        try:
+            with open(CSV_FILENAME, mode='a', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow(data_list)
+        except Exception as e:
+            self.log_received.emit("SYS", f"CSV 저장 실패: {e}")
+            
+    def process_raw_data(self, line):
+        """
+        FSW RAW 데이터를 파싱하고 전압/전류 더미 데이터를 생성합니다.
+        FSW main.cpp의 generateTelemetry() 순서와 1:1 대응됩니다.
+        """
+        parts = [p.strip() for p in line.split(',')]
+        
+        # FSW 패킷 규격(22개 항목) 확인
+        if len(parts) >= 22 and parts[0] == str(TEAM_ID):
+            try:
+                # --- 더미 데이터 주입 섹션 ---
+                # Index 8: VOLTAGE (배터리 전압)
+                parts[8] = str(round(random.uniform(3.7, 4.2), 2)) 
+                # Index 9: CURRENT (소비 전류)
+                parts[9] = str(round(random.uniform(100.0, 500.0), 1))
+
+                # --- 데이터 추출 및 유효성 확인 ---
+                self.packet_count = int(parts[2])
+                
+                # FSW 규격: Index 18(위도), 19(경도)
+                self.latest_gps['lat'] = float(parts[18]) 
+                self.latest_gps['lng'] = float(parts[19])
+                
+                # 자이로(R, P, Y) 데이터가 들어오는지 디버그 출력
+                # Index 10: gyroR, 11: gyroP, 12: gyroY
+                r, p, y = parts[10], parts[11], parts[12]
+                if float(r) == 0.0 and float(p) == 0.0 and float(y) == 0.0:
+                    print(f"DEBUG: IMU data is zero (Packet #{self.packet_count})")
+
+                # UI로 데이터 전송 및 CSV 저장
+                self.data_received.emit(parts)
+                self.save_to_csv(parts)
+                
+                # CMD_ECHO 필드(Index 21) 확인
+                if parts[21] != "":
+                    self.log_received.emit("SYS", f"ECHO: {parts[21]} (Packet #{self.packet_count})")
+                    
+            except (ValueError, IndexError) as e:
+                print(f"Parsing Error: {e} | Data: {line}")
+        else:
+            # 텔레메트리가 아닌 일반 로그 메시지 처리
+            self.log_received.emit("RX_LOG", line)
+
+    def update_state(self, new_state):
+        self.state = new_state
+        self.state_changed.emit(new_state)
+
+    def cmd_cx_on(self):
+        if self.state != SIM_STATE["IDLE"]:
+            self.sim_timer.stop()
+            self.update_state(SIM_STATE["IDLE"])
+            
+        self.worker.send_command(f"CMD,{TEAM_ID},CX,ON")
+        self.log_received.emit("CMD", "CX ON 전송")
+
+    def load_sim_data(self):
+        file_path, _ = QFileDialog.getOpenFileName(None, "시뮬레이션 데이터 로드", "", "Text Files (*.txt)")
+        if file_path:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                self.sim_data = [l.strip() for l in f.readlines() if l.strip()]
+            
+            if self.sim_data:
+                self.sim_index = 0
+                self.worker.send_command(f"CMD,{TEAM_ID},SIM,ENABLE")
+                self.update_state(SIM_STATE["ENABLED"])
+                self.log_received.emit("SIM", f"데이터 로드 완료: {len(self.sim_data)} 라인")
+
+    def activate_sim(self):
+        if self.sim_data:
+            self.worker.send_command(f"CMD,{TEAM_ID},SIM,ACTIVATE")
+            self.sim_timer.start(1000) 
+            self.update_state(SIM_STATE["RUNNING"])
+
+    def send_next_sim_line(self):
+        if self.sim_index < len(self.sim_data):
+            self.worker.send_command(self.sim_data[self.sim_index])
+            self.sim_index += 1
+        else:
+            self.sim_timer.stop()
+            self.update_state(SIM_STATE["ENABLED"])
+
+    def cmd_cx_off(self):
+        self.sim_timer.stop() 
+        self.worker.send_command(f"CMD,{TEAM_ID},CX,OFF")
+        self.log_received.emit("CMD", "CX OFF 전송")
+
+    def cmd_calibrate(self):
+        self.worker.send_command(f"CMD,{TEAM_ID},CAL")
+        self.log_received.emit("CMD", "CAL(캘리브레이션) 전송")
+
+    def cmd_set_time(self):
+        now_utc = datetime.datetime.utcnow().strftime("%H:%M:%S")
+        self.worker.send_command(f"CMD,{TEAM_ID},ST,{now_utc}")
+        self.log_received.emit("CMD", f"시간 설정(ST) 전송: {now_utc}")
+        
+    def cmd_mec_on(self):
+        self.worker.send_command(f"CMD,{TEAM_ID},MEC,ON")
+        self.log_received.emit("CMD", "MEC ON 전송")

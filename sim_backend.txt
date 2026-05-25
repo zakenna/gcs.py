@@ -1,0 +1,169 @@
+import time
+import datetime
+import csv
+import os
+import random
+from PyQt6.QtCore import QObject, pyqtSignal, QThread, QTimer
+from PyQt6.QtWidgets import QFileDialog
+import serial
+
+# =========================================================
+# FSW(Teensy) New_Teensy/src/main.cpp 규격과 100% 동기화
+# =========================================================
+TEAM_ID = 1062
+SERIAL_PORT_NAME = "COM3" 
+BAUDRATE = 9600 
+CSV_FILENAME = "Flight_1062.csv"
+
+# 미션 상태 정의 (readme.md 기반)
+FLIGHT_STATES = ["LAUNCH_PAD", "ASCENT", "APOGEE", "DESCENT", "PAYLOAD_RELEASE", "PROBE_RELEASE", "LANDED"]
+
+CSV_HEADERS = [
+    "TEAM_ID", "MISSION_TIME", "PACKET_COUNT", "MODE", "STATE", 
+    "ALTITUDE", "TEMPERATURE", "PRESSURE", "VOLTAGE", "CURRENT", 
+    "GYRO_R", "GYRO_P", "GYRO_Y", 
+    "ACCEL_X", "ACCEL_Y", "ACCEL_Z", 
+    "GPS_TIME", "GPS_ALTITUDE", "GPS_LATITUDE", "GPS_LONGITUDE", "GPS_SATS", 
+    "CMD_ECHO"
+]
+
+class SerialWorker(QThread):
+    data_received = pyqtSignal(str) 
+
+    def __init__(self, port_name, baudrate):
+        super().__init__()
+        self.port_name = port_name
+        self.baudrate = baudrate
+        self.serial_port = None
+        self.is_running = False
+
+    def run(self):
+        self.is_running = True
+        try:
+            # 시리얼 포트 연결 시도 (없어도 에러로 멈추지 않게 처리)
+            self.serial_port = serial.Serial(self.port_name, self.baudrate, timeout=0.1)
+            print(f"✅ [GCS] XBee 연결 성공: {self.port_name}")
+            while self.is_running:
+                if self.serial_port and self.serial_port.in_waiting:
+                    line = self.serial_port.readline().decode('utf-8', errors='ignore').strip()
+                    if line: self.data_received.emit(line)
+                self.msleep(10)
+        except Exception as e:
+            print(f"⚠️ [GCS] 실제 XBee 연결 불가 (시뮬레이션 모드 권장): {e}")
+
+    def send_command(self, command_str):
+        if self.serial_port and self.serial_port.is_open:
+            self.serial_port.write((command_str.strip() + "\n").encode('utf-8'))
+        print(f"[GCS -> CMD]: {command_str.strip()}")
+
+class GCSBackend(QObject):
+    data_received = pyqtSignal(list)
+    log_received = pyqtSignal(str, str)
+
+    def __init__(self):
+        super().__init__()
+        self.is_virtual = False  # 시뮬레이션 모드 플래그
+        self.packet_count = 0
+        
+        # 가상 미션 변수
+        self.v_alt = 0.0
+        self.v_max_alt = 0.0
+        self.v_state_idx = 0
+        self.v_start_time = None
+        
+        self.sim_timer = QTimer()
+        self.sim_timer.timeout.connect(self.run_virtual_mission)
+        
+        self.init_csv_file()
+        self.worker = SerialWorker(SERIAL_PORT_NAME, BAUDRATE)
+        self.worker.data_received.connect(self.process_raw_data)
+        self.worker.start()
+
+    def init_csv_file(self):
+        if not os.path.exists(CSV_FILENAME):
+            with open(CSV_FILENAME, mode='w', newline='', encoding='utf-8') as f:
+                csv.writer(f).writerow(CSV_HEADERS)
+
+    def process_raw_data(self, line):
+        parts = [p.strip() for p in line.split(',')]
+        if len(parts) >= 22 and parts[0] == str(TEAM_ID):
+            self.data_received.emit(parts)
+            self.save_to_csv(parts)
+
+    def save_to_csv(self, data_list):
+        with open(CSV_FILENAME, mode='a', newline='', encoding='utf-8') as f:
+            csv.writer(f).writerow(data_list)
+
+    # 🚀 시뮬레이션 엔진: 실제 미션 프로필을 따라감
+    def run_virtual_mission(self):
+        if not self.v_start_time: self.v_start_time = time.time()
+        
+        elapsed = int(time.time() - self.v_start_time)
+        cur_state = FLIGHT_STATES[self.v_state_idx]
+
+        # --- 물리 시뮬레이션 ---
+        if cur_state == "LAUNCH_PAD":
+            self.v_alt = 0.0
+            if elapsed > 3: self.v_state_idx = 1 # 3초 후 발사
+        elif cur_state == "ASCENT":
+            self.v_alt += 15.0 + random.uniform(-1, 1) # 초당 15m 상승
+            if self.v_alt > 700: # 700m 도달 시 정점
+                self.v_max_alt = self.v_alt
+                self.v_state_idx = 2
+        elif cur_state == "APOGEE":
+            self.v_state_idx = 3 # 정점 도달 후 즉시 하강 시작
+        elif cur_state == "DESCENT":
+            self.v_alt -= 15.0 # 초당 15m 하강
+            if self.v_alt <= self.v_max_alt * 0.8: # 80% 지점에서 방출
+                self.v_state_idx = 4
+        elif cur_state == "PAYLOAD_RELEASE":
+            self.v_alt -= 5.0 # 낙하산 전개 후 천천히 하강 (5m/s)
+            if self.v_alt <= 2.0: # 2m 지점
+                self.v_state_idx = 5
+        elif cur_state == "PROBE_RELEASE":
+            self.v_alt -= 2.0
+            if self.v_alt <= 0:
+                self.v_alt = 0
+                self.v_state_idx = 6
+        elif cur_state == "LANDED":
+            self.v_alt = 0.0
+
+        # --- 패킷 생성 (New_Teensy/src/main.cpp 규격) ---
+        packet = [
+            str(TEAM_ID),
+            time.strftime("%H:%M:%S", time.gmtime(elapsed)),
+            str(self.packet_count),
+            'S', # Mode: Simulation
+            cur_state,
+            f"{self.v_alt:.1f}",
+            f"{25.0 + random.uniform(-0.5, 0.5):.2f}", # Temp
+            f"{101.3 - (self.v_alt/100):.2f}", # Pressure
+            f"{random.uniform(3.7, 4.2):.2f}", # Voltage (더미)
+            f"{random.uniform(100, 500):.1f}", # Current (더미)
+            "0.00", "0.00", "0.00", # Gyro RPY
+            "0.00", "0.00", "9.8", # Accel XYZ
+            time.strftime("%H:%M:%S", time.gmtime()),
+            f"{self.v_alt:.1f}", # GPS Alt
+            "37.5665", "126.9780", # GPS Lat/Lon (서울 기준)
+            "12", # GPS Sats
+            "SIM_ACTIVE"
+        ]
+        
+        self.packet_count += 1
+        self.data_received.emit(packet)
+        self.save_to_csv(packet)
+
+    # 지상국 명령 함수들
+    def cmd_cx_on(self):
+        self.is_virtual = True
+        self.v_start_time = time.time()
+        self.sim_timer.start(1000) # 1Hz 전송 시작
+        self.log_received.emit("SYS", "시뮬레이션 모드 미션 시작 (CX ON)")
+
+    def cmd_cx_off(self):
+        self.sim_timer.stop()
+        self.log_received.emit("SYS", "미션 중지 (CX OFF)")
+
+    def cmd_calibrate(self):
+        self.v_alt = 0.0
+        self.log_received.emit("SYS", "고도 0m 보정 완료")

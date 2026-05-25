@@ -14,7 +14,7 @@ from src.components.views.echo_view import EchoTerminal
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GCS - Team CosmoLink (Real Backend)")
+        self.setWindowTitle("GCS - Team CosmoLink (Real FSW Interface)")
         self.resize(1280, 800)
         self.setStyleSheet("background-color: #f3f4f6;") 
 
@@ -43,32 +43,30 @@ class MainWindow(QMainWindow):
         wrapper_layout = QVBoxLayout(self.content_wrapper)
         wrapper_layout.setContentsMargins(15, 15, 15, 15)
 
-        # 툴바 구성
+        # 상단 툴바 구성
         btn_toolbar = QHBoxLayout()
         btn_calib = QPushButton("CALIBRATE")
         btn_cx_on = QPushButton("CX ON")
         btn_cx_off = QPushButton("CX OFF")
         btn_set_time = QPushButton("SET TIME")
         
+        # 서보모터 구동 상태 플래그 초기화 (False: 꺼짐, True: 켜짐)
+        self.mec_servo_active = False 
+        
         for btn in [btn_calib, btn_cx_on, btn_cx_off, btn_set_time]:
             btn.setStyleSheet("QPushButton { background: white; border: 1px solid #d1d5db; padding: 6px 12px; font-weight: bold; border-radius: 4px; } QPushButton:hover { background: #f3f4f6; }")
             btn_toolbar.addWidget(btn)
         
-        self.btn_mec_on = QPushButton("MEC ON")
-        self.btn_mec_on.setStyleSheet("QPushButton { background-color: #7c3aed; color: white; font-weight: bold; border: 1px solid #6d28d9; padding: 6px 12px; border-radius: 4px; } QPushButton:hover { background-color: #6d28d9; }")
-        btn_toolbar.addWidget(self.btn_mec_on)
+        # 버튼을 상태에 따라 동적으로 제어할 수 있도록 인스턴스 명시 변경
+        self.btn_mec_toggle = QPushButton("MEC SERVO ON")
+        self.btn_mec_toggle.setStyleSheet("QPushButton { background: white; border: 1px solid #d1d5db; padding: 6px 12px; font-weight: bold; border-radius: 4px; color: #1e293b; } QPushButton:hover { background: #f3f4f6; }")
+        btn_toolbar.addWidget(self.btn_mec_toggle)
 
         btn_toolbar.addStretch()
 
-        # ========================================================
-        # [수정된 부분] 검색 UI 디자인 (알약 모양 + 그라데이션)
-        # ========================================================
-        
-        # 1. 검색바 컨테이너 (알약 모양)
+        # 검색 UI 검색창 패널
         self.search_pill = QFrame()
         self.search_pill.setFixedSize(280, 42) 
-        
-        # 2. 컨테이너 스타일 (그라데이션 + 둥근 모서리)
         self.search_pill.setStyleSheet("""
             QFrame {
                 background-color: qlineargradient(spread:pad, x1:0, y1:0, x2:0, y2:1, 
@@ -82,12 +80,10 @@ class MainWindow(QMainWindow):
             }
         """)
         
-        # 3. 내부 레이아웃
         pill_layout = QHBoxLayout(self.search_pill)
         pill_layout.setContentsMargins(15, 0, 5, 0)
         pill_layout.setSpacing(5)
 
-        # 4. 입력창 (배경 투명화)
         self.input_search = QLineEdit()
         self.input_search.setPlaceholderText("Find Time (e.g. 12:00:00)")
         self.input_search.setStyleSheet("""
@@ -99,7 +95,6 @@ class MainWindow(QMainWindow):
             }
         """)
         
-        # 5. 돋보기 버튼 (배경 투명화)
         self.btn_search = QPushButton("🔍")
         self.btn_search.setFixedSize(32, 32)
         self.btn_search.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -117,22 +112,18 @@ class MainWindow(QMainWindow):
             }
         """)
 
-        # 컨테이너에 위젯 추가
         pill_layout.addWidget(self.input_search)
         pill_layout.addWidget(self.btn_search)
-
-        # 툴바에 '알약 컨테이너'를 추가 (이전에는 각각 추가했었음)
         btn_toolbar.addWidget(self.search_pill)
-        # ========================================================
 
         wrapper_layout.addLayout(btn_toolbar)
 
-        # 연결
+        # 슬롯 신호 라우팅 매핑 체결
         btn_calib.clicked.connect(self.backend.cmd_calibrate)
         btn_cx_on.clicked.connect(self.backend.cmd_cx_on)
         btn_cx_off.clicked.connect(self.backend.cmd_cx_off)
         btn_set_time.clicked.connect(self.backend.cmd_set_time)
-        self.btn_mec_on.clicked.connect(self.confirm_mec_on)
+        self.btn_mec_toggle.clicked.connect(self.handle_mec_toggle)
         self.input_search.returnPressed.connect(self.execute_search)
         self.btn_search.clicked.connect(self.execute_search)
 
@@ -163,16 +154,6 @@ class MainWindow(QMainWindow):
         self.view_table.add_data(data)
         self.view_chart.update_chart(data)
         self.header.update_packet_count(self.backend.packet_count)
-        self.sidebar.update_gps_data() 
-        
-        # [수정] Map 업데이트 인덱스 (18, 19)
-        try:
-            lat = float(data[18]) 
-            lng = float(data[19])
-            if lat != 0 and lng != 0:
-                self.sidebar.map_view.update_map(lat, lng)
-        except:
-            pass
         
     def on_state_changed(self, new_state):
         if new_state == SIM_STATE["IDLE"]:
@@ -186,10 +167,24 @@ class MainWindow(QMainWindow):
         if self.container.currentIndex() == 0: 
             self.view_table.search_time_and_scroll(target)
 
-    def confirm_mec_on(self):
-        reply = QMessageBox.question(self, "Warning", "MEC ON 명령을 전송하시겠습니까?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            self.backend.cmd_mec_on()
+    def handle_mec_toggle(self):
+        """Teensy FSW 파서 토큰 구조에 부합되게 완전히 재구축된 양방향 제어 토글 시퀀스"""
+        if not self.mec_servo_active:
+            reply = QMessageBox.question(self, "MEC ON Warning", "Teensy FSW 서보모터를 활성화(MEC ON) 하시겠습니까?", 
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.Yes:
+                self.backend.cmd_mec_servo_on()
+                self.mec_servo_active = True
+                self.btn_mec_toggle.setText("MEC SERVO OFF")
+                self.btn_mec_toggle.setStyleSheet("QPushButton { background: #fee2e2; border: 1px solid #fca5a5; padding: 6px 12px; font-weight: bold; color: #dc2626; border-radius: 4px; } QPushButton:hover { background: #ffeeee; }")
+        else:
+            reply = QMessageBox.question(self, "MEC OFF Warning", "Teensy FSW 서보모터를 비활성화(MEC OFF) 하시겠습니까?", 
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+            if reply == QMessageBox.StandardButton.Yes:
+                self.backend.cmd_mec_servo_off()
+                self.mec_servo_active = False
+                self.btn_mec_toggle.setText("MEC SERVO ON")
+                self.btn_mec_toggle.setStyleSheet("QPushButton { background: white; border: 1px solid #d1d5db; padding: 6px 12px; font-weight: bold; color: #1e293b; border-radius: 4px; } QPushButton:hover { background: #f3f4f6; }")
 
     def closeEvent(self, event):
         if self.backend.worker.isRunning():
