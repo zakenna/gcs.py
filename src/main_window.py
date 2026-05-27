@@ -1,9 +1,11 @@
 import sys
+import shutil
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                             QFrame, QPushButton, QStackedWidget, QLineEdit, QLabel)
+                             QFrame, QPushButton, QStackedWidget, QLineEdit,
+                             QLabel, QFileDialog)
 from PyQt6.QtCore import Qt
 
-from src.backend import GCSBackend, SIM_STATE
+from src.backend import GCSBackend, SIM_STATE, CSV_FILENAME, TEAM_ID
 from src.components.header import HeaderWidget
 from src.components.sidebar import SidebarWidget
 from src.components.views.table_view import TelemetryTable
@@ -66,6 +68,15 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(slot)
             btn_toolbar.addWidget(btn)
 
+        # EXPORT CSV — 심사위원 제출용 (미션 가이드 3.1.1.2)
+        btn_export = QPushButton("EXPORT CSV")
+        btn_export.setStyleSheet(
+            "QPushButton { background:#dcfce7; border:1px solid #86efac; "
+            "padding:6px 12px; font-weight:bold; border-radius:4px; color:#15803d; } "
+            "QPushButton:hover { background:#bbf7d0; }")
+        btn_export.clicked.connect(self.export_csv)
+        btn_toolbar.addWidget(btn_export)
+
         btn_toolbar.addStretch()
 
         # ── 검색 필드 ────────────────────────────────────────────
@@ -123,7 +134,7 @@ class MainWindow(QMainWindow):
         self.input_search.returnPressed.connect(self.execute_search)
         self.btn_search.clicked.connect(self.execute_search)
         self.backend.data_received.connect(self.on_data_received)
-        self.backend.log_received.connect(self.view_echo.append_log)
+        self.backend.log_received.connect(self.view_echo.append_log)  # str 1개
         self.backend.state_changed.connect(self.on_state_changed)
 
     _VIEW_MAP = {"chart": 1, "table": 0, "echo": 2}
@@ -142,12 +153,27 @@ class MainWindow(QMainWindow):
         if new_state == SIM_STATE["IDLE"]:
             self.view_table.clear_table()
             self.view_chart.clear_chart()
+            self.view_echo.clear_terminal()
             self.input_search.clear()
 
     def execute_search(self):
         target = self.input_search.text().strip()
         if target and self.container.currentIndex() == 0:
             self.view_table.search_time_and_scroll(target)
+
+    def export_csv(self):
+        """CSV 파일을 USB 등 원하는 위치에 저장 (미션 가이드 3.1.1.2)"""
+        import os
+        dst, _ = QFileDialog.getSaveFileName(
+            self, "Export CSV to USB",
+            f"Flight_{TEAM_ID}.csv",
+            "CSV Files (*.csv)")
+        if dst:
+            try:
+                shutil.copy2(CSV_FILENAME, dst)
+                self.view_echo.append_log(f"✅ CSV 저장 완료: {dst}")
+            except Exception as e:
+                self.view_echo.append_log(f"❌ CSV 저장 실패: {e}")
 
     def closeEvent(self, event):
         if self.backend.worker.isRunning():
