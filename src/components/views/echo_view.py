@@ -1,42 +1,67 @@
-# src/components/views/echo_view.py
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QTextBrowser
-from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QPlainTextEdit, QLabel
+from PyQt6.QtCore import Qt, QDateTime
+from PyQt6.QtGui import QFont
 
-class EchoTerminal(QWidget):
+class EchoTerminal(QWidget):  # 메인 윈도우 연동을 위한 클래스명 유지
     def __init__(self):
         super().__init__()
-        self.setStyleSheet("""
-            QWidget { background-color: #1e1e1e; border: 1px solid #374151; border-radius: 6px; }
-            QTextBrowser { background-color: #1e1e1e; color: #00ff00; font-family: 'Consolas'; border: none; font-size: 14px; padding: 10px; }
-            QLabel { background-color: transparent; border: none; font-family: 'Segoe UI'; }
-        """)
-
+        
+        # 전체 레이아웃 설정 (여백 최소화)
         layout = QVBoxLayout(self)
-        header_layout = QHBoxLayout()
-        lbl_title = QLabel("COMMAND ECHO TERMINAL")
-        lbl_title.setStyleSheet("color: #d1d5db; font-weight: bold;")
-        header_layout.addWidget(lbl_title)
-        header_layout.addStretch()
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
         
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("background-color: #374151; max-height: 1px;")
-
-        self.terminal = QTextBrowser()
+        # 1. 상단 뷰 타이틀 안내 레이블 (Bold 적용)
         
-        layout.addLayout(header_layout)
-        layout.addWidget(line)
+        # 2. 메인 터미널 텍스트 에디터 생성
+        self.terminal = QPlainTextEdit()
+        self.terminal.setReadOnly(True)  # 로그 모니터이므로 수정 불가 고정
+        
+        # 가로 폭 부족 시 자동으로 다음 줄로 부드럽게 넘어가도록 래핑 설정
+        self.terminal.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        
+        # 순백색 배경(#ffffff), 진한 블랙(#111827) 기본 세팅 (전체 bold 스타일 제거)
+        self.terminal.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #ffffff;
+                color: #111827;
+                border: 1px solid #d1d5db;
+                border-radius: 8px;
+                padding: 12px;
+            }
+        """)
+        
+        # 개발자 전용 고정폭 폰트(Consolas) 보통 두께로 지정
+        font = QFont("Consolas", 11)
+        self.terminal.setFont(font)
+        
         layout.addWidget(self.terminal)
-        self.terminal.append("<div style='color: #6b7280;'>System Ready.</div>")
 
-    def append_log(self, sender, text):
-        html = f"""
-        <div style='margin-bottom: 4px;'>
-            <span style='color: #60a5fa; font-weight: bold;'>[{sender}]</span>
-            <span style='color: #00ff00;'> {text}</span>
-        </div>
+    def append_log(self, sender: str, text: str = None):
         """
-        self.terminal.append(html)
-        # 스크롤 최하단으로 이동
-        sb = self.terminal.verticalScrollBar()
-        sb.setValue(sb.maximum())
+        GCSBackend 시그널 포맷(sender, text)에 맞춘 로그 추가 메서드
+        시간 부분만 <b> 태그를 적용해 굵게 출력합니다.
+        """
+        # main_window에서 단순 문자열 하나만 보냈을 때를 위한 예외 처리 가드
+        if text is None:
+            text = sender
+            
+        if not text:
+            return
+            
+        # 1. 현재 시스템의 실시간 UTC 시간 추출 (HH:mm:ss)
+        utc_now = QDateTime.currentDateTimeUtc().toString("HH:mm:ss")
+        
+        # 2. 시간은 <b> 태그로 감싸고 본문은 그대로 두어 두께를 이원화 (&nbsp;는 공백 확보용)
+        formatted_log = f"<span style='color: #111827;'><b>[{utc_now}]--- </b>{text.strip()}</span>"
+        
+        # 3. HTML 형식으로 터미널에 로그 추가
+        self.terminal.appendHtml(formatted_log)
+        
+        # 4. 새 로그가 들어오면 항상 최하단으로 자동 스크롤 고정
+        scrollbar = self.terminal.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def clear_terminal(self):
+        """터미널 화면 초기화 리셋 핸들러"""
+        self.terminal.clear()
